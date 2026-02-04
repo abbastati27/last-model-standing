@@ -1,71 +1,46 @@
 import requests
 import json
 import random
-import copy
+import re
 from app.llm.prompts import BASE_RULES, PLAYER_PROMPTS
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL = "llama3.1:8b"
 
+JSON_REGEX = re.compile(r"\{[\s\S]*\}")
 
-def _sanitize_game_state_for_player(player_id: str, game_state: dict) -> dict:
-    """
-    Make the game state SELF-CENTERED and NON-AUTHORITATIVE.
-    This prevents global dogpiling and predicted-winner fixation.
-    """
-    state = copy.deepcopy(game_state)
 
-    # 1️⃣ Remove absolute authority from predicted_winner
-    if "predicted_winner" in state:
-        # Convert it into a weak, uncertain hint
-        state["predicted_winner_hint"] = (
-            f"Uncertain projection. May be wrong. Do not treat as a target."
-        )
-        del state["predicted_winner"]
-
-    # 2️⃣ Explicitly remind model who it is
-    state["you_are"] = player_id
-
-    # 3️⃣ Add self-relative context (important for selfish play)
-    my_points = state["players"][player_id]["points"]
-    state["relative_position"] = {
-        "my_points": my_points,
-        "players_above_me": [
-            p for p, v in state["players"].items()
-            if v["points"] > my_points
-        ],
-        "players_below_me": [
-            p for p, v in state["players"].items()
-            if v["points"] < my_points
-        ]
-    }
-
-    return state
+def extract_json(text: str) -> dict | None:
+    match = JSON_REGEX.search(text)
+    if not match:
+        return None
+    try:
+        return json.loads(match.group())
+    except json.JSONDecodeError:
+        return None
 
 
 def get_player_move(player_id: str, game_state: dict) -> dict:
     try:
-        safe_state = _sanitize_game_state_for_player(player_id, game_state)
-
         prompt = f"""
 {BASE_RULES}
 
 {PLAYER_PROMPTS[player_id]}
 
-IMPORTANT:
-- You are Player {player_id}.
-- You act ONLY for your own benefit.
-- Any hints about winners are uncertain and may be wrong.
-- Do NOT coordinate with other players.
+CURRENT GAME STATE:
+{json.dumps(game_state, indent=2)}
 
-Current game state (self-centered view):
-{json.dumps(safe_state, indent=2)}
+FINAL INSTRUCTION (MOST IMPORTANT):
+- Respond with ONE valid JSON object
+- No text before or after JSON
+- No markdown
+- No explanation outside JSON
 
-Respond ONLY in this JSON format:
+JSON ONLY:
 {{
-  "raw_take_from": "<player_id>",
-  "raw_give_to": "<player_id>",
-  "reason": "<why this benefits YOU>"
+  "take_from": "A",
+  "give_to": "B",
+  "reason": "short explanation focused on my advantage"
 }}
 """
 
@@ -73,22 +48,34 @@ Respond ONLY in this JSON format:
             "model": MODEL,
             "prompt": prompt,
             "stream": False,
+            # 🔑 key change: reduce randomness, increase obedience
             "options": {
-                "temperature": 0.8,
-                "top_p": 0.9
+                "temperature": 0.4,
+                "top_p": 0.9,
+                "num_predict": 120
             }
         }
 
         response = requests.post(OLLAMA_URL, json=payload, timeout=60)
         response.raise_for_status()
 
-        text = response.json()["response"].strip()
-        move = json.loads(text)
+        raw_text = response.json().get("response", "")
+        move = extract_json(raw_text)
 
-        return move
+        if not move:
+            raise ValueError("No valid JSON returned")
 
-    except Exception as e:
-        # 🔒 SAFE fallback (rule-compliant, selfish)
+        if not all(k in move for k in ("take_from", "give_to", "reason")):
+            raise ValueError("Missing required keys")
+
+        return {
+            "take_from": move["take_from"],
+            "give_to": move["give_to"],
+            "reason": move["reason"]
+        }
+
+    except Exception:
+        # SAFE FALLBACK (RULE COMPLIANT)
         players = list(game_state["players"].keys())
         others = [p for p in players if p != player_id]
 
@@ -96,7 +83,7 @@ Respond ONLY in this JSON format:
         give_to = random.choice([p for p in others if p != take_from])
 
         return {
-            "raw_take_from": take_from,
-            "raw_give_to": give_to,
-            "reason": "Fallback move due to invalid model response."
+            "take_from": take_from,
+            "give_to": give_to,
+            "reason": "Fallback move due to invalid LLM output."
         }

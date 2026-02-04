@@ -21,54 +21,48 @@ function Result() {
     navigate("/");
   }
 
-  if (!state) return <p>Loading…</p>;
+  if (!state || !state.players) {
+    return <p style={{ textAlign: "center" }}>Loading…</p>;
+  }
 
-  const winner = Object.entries(state.players)
-    .sort((a, b) => b[1].points - a[1].points)[0][0];
+  // 🏆 Determine winner safely
+  const winnerEntry = Object.entries(state.players).sort(
+    (a, b) => b[1].points - a[1].points
+  )[0];
 
-  const guessedCorrectly = state.predicted_winner === winner;
+  const winner = winnerEntry?.[0];
 
-  const mood = guessedCorrectly
-    ? {
-        bg: "#0f5132",
-        title: "YOU WON 🎉",
-        subtitle: "Your prediction was spot on!",
-        feedback: "🔥 Nailed it. You read the game perfectly.",
-      }
-    : {
-        bg: "#842029",
-        title: "YOU LOST 💔",
-        subtitle: "The game had other plans.",
-        feedback: "😬 Oof. Happens to the best of us.",
-      };
+  if (!winner || !PLAYERS[winner]) {
+    return (
+      <p style={{ textAlign: "center", color: "red" }}>
+        Error determining winner.
+      </p>
+    );
+  }
+
+  // 🧠 Prediction may or may not exist
+  const hasPrediction = Boolean(state.predicted_winner);
+  const guessedCorrectly =
+    hasPrediction && state.predicted_winner === winner;
 
   return (
     <div
       style={{
         minHeight: "100vh",
-        background: mood.bg,
+        background: "#0f1220",
         color: "#fff",
         textAlign: "center",
         padding: "50px 20px",
-        paddingBottom: "-100px",
-        marginTop: "-60px",
-        // marginBottom: "-550px",
       }}
     >
-      {/* Main Emotion */}
+      {/* Title */}
       <h1 style={{ fontSize: "3rem", marginBottom: "10px" }}>
-        {mood.title}
+        🏁 Game Over
       </h1>
 
-      <p style={{ fontSize: "1.2rem", opacity: 0.9 }}>
-        {mood.subtitle}
-      </p>
-
-      <hr style={{ margin: "30px auto", width: "60%", opacity: 0.3 }} />
-
-      {/* Actual Winner */}
-      <h2 style={{ color: PLAYERS[winner].color }}>
-        🏆 {PLAYERS[winner].name} WON THE GAME
+      {/* Winner */}
+      <h2 style={{ color: PLAYERS[winner].color, marginTop: "20px" }}>
+        🏆 {PLAYERS[winner].name} WINS
       </h2>
 
       {/* Scores */}
@@ -81,24 +75,30 @@ function Result() {
         ))}
       </ul>
 
-      {/* Prediction Feedback */}
-      <div
-        style={{
-          marginTop: "30px",
-          padding: "20px",
-          borderRadius: "12px",
-          background: guessedCorrectly
-            ? "rgba(25,135,84,0.2)"
-            : "rgba(220,53,69,0.2)",
-        }}
-      >
-        <h3>Your Prediction</h3>
-        <p>
-          You backed{" "}
-          <strong>{PLAYERS[state.predicted_winner].name}</strong>
-        </p>
-        <p style={{ fontSize: "1.1rem" }}>{mood.feedback}</p>
-      </div>
+      {/* Prediction (ONLY if available) */}
+      {hasPrediction && PLAYERS[state.predicted_winner] && (
+        <div
+          style={{
+            marginTop: "30px",
+            padding: "20px",
+            borderRadius: "12px",
+            background: guessedCorrectly
+              ? "rgba(25,135,84,0.25)"
+              : "rgba(220,53,69,0.25)",
+          }}
+        >
+          <h3>Your Prediction</h3>
+          <p>
+            You predicted{" "}
+            <strong>{PLAYERS[state.predicted_winner].name}</strong>
+          </p>
+          <p style={{ fontSize: "1.1rem" }}>
+            {guessedCorrectly
+              ? "✅ Spot on. You read the game well."
+              : "❌ The game played out differently."}
+          </p>
+        </div>
+      )}
 
       {/* CTA */}
       <button

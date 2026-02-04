@@ -1,6 +1,5 @@
 import random
 from copy import deepcopy
-from shutil import move
 from app.game.state import initial_game_state, PLAYERS
 from app.game.rules import (
     apply_repeated_target_penalty,
@@ -15,7 +14,11 @@ class GameEngine:
     def __init__(self):
         self.state = None
 
-    def start_new_game(self, predicted_winner: str):
+    # -------------------------------------------------
+    # Game lifecycle
+    # -------------------------------------------------
+    def start_new_game(self, predicted_winner: str | None = None):
+        # predicted_winner is intentionally ignored for gameplay fairness
         self.state = initial_game_state(predicted_winner)
 
     def get_state(self):
@@ -24,9 +27,9 @@ class GameEngine:
     def reset(self):
         self.state = None
 
-    # ---------------------------
-    # Realtime round start
-    # ---------------------------
+    # -------------------------------------------------
+    # Round start (realtime)
+    # -------------------------------------------------
     def start_round(self, round_number: int):
         if round_number != self.state.round + 1:
             return {"error": "Invalid round order"}
@@ -34,6 +37,7 @@ class GameEngine:
         self.state.round = round_number
         self.state.turn_index = 0
 
+        # Lowest points start first
         self.state.round_order = sorted(
             self.state.players.keys(),
             key=lambda p: self.state.players[p].points
@@ -45,60 +49,70 @@ class GameEngine:
             "starting_player": self.state.round_order[0]
         }
 
-    # ---------------------------
-    # Realtime single move
-    # ---------------------------
+    # -------------------------------------------------
+    # Single move execution (realtime)
+    # -------------------------------------------------
     def play_next_move(self):
         if self.state.turn_index >= len(self.state.round_order):
             return {"round_complete": True}
 
         player = self.state.round_order[self.state.turn_index]
 
+        # Snapshot BEFORE move (for deltas & logs)
         before_points = {
             p: self.state.players[p].points
             for p in self.state.players
         }
 
+        # AI should NOT see predicted winner
         ai_input_state = deepcopy(self.state.dict())
+        ai_input_state.pop("predicted_winner", None)
+
         move = get_player_move(player, ai_input_state)
 
         raw_take = move.get("take_from")
         raw_give = move.get("give_to")
         reason = move.get("reason", "")
 
+        # Sanitize invalid/self targets
         take_from, give_to = sanitize_move(player, move, PLAYERS)
 
         corrected = {
-            "take_from_corrected": take_from != raw_take,
-            "give_to_corrected": give_to != raw_give
+            "take_from_corrected": raw_take != take_from,
+            "give_to_corrected": raw_give != give_to
         }
 
-        # ---- RULE RESOLUTION ----
-        transfer_requested = 2
+        # -------------------------------------------------
+        # RULE APPLICATION PIPELINE
+        # -------------------------------------------------
+        BASE_TRANSFER = 2
 
-        # repeated target penalty
-        transfer_after_repeat = apply_repeated_target_penalty(
+        # Repeated target penalty
+        after_repeat = apply_repeated_target_penalty(
             self.state.round,
             self.state.history,
             player,
             take_from,
-            transfer_requested
+            BASE_TRANSFER
         )
 
-        # mutual alliance cap (must pass THIS round actions)
-        transfer_final = apply_mutual_alliance_cap(
-            self.state.history,
+        # Mutual alliance cap (round-local, not full history)
+        final_transfer = apply_mutual_alliance_cap(
+            [],
             player,
             give_to,
-            transfer_after_repeat
+            after_repeat
         )
 
-        transfer_final = max(0, min(2, transfer_final))
+        final_transfer = max(0, min(BASE_TRANSFER, final_transfer))
 
-    # ---- APPLY TRANSFER (NO SELF TAX) ----
-        self.state.players[take_from].points -= transfer_final
-        self.state.players[give_to].points += transfer_final
+        # -------------------------------------------------
+        # APPLY POINTS (NO SELF TAX)
+        # -------------------------------------------------
+        self.state.players[take_from].points -= final_transfer
+        self.state.players[give_to].points += final_transfer
 
+        # Snapshot AFTER move
         after_points = {
             p: self.state.players[p].points
             for p in self.state.players
@@ -110,15 +124,16 @@ class GameEngine:
             if after_points[p] != before_points[p]
         }
 
+        # -------------------------------------------------
+        # STRUCTURED LOGGING
+        # -------------------------------------------------
         log = {
             "round": self.state.round,
             "turn_index": self.state.turn_index,
             "player": player,
             "turn_order": self.state.round_order,
 
-            "ai_input": {
-                "visible_state": ai_input_state
-            },
+            "ai_input": ai_input_state,
 
             "ai_output": {
                 "raw_take_from": raw_take,
@@ -133,8 +148,9 @@ class GameEngine:
             },
 
             "rule_effects": {
-                "transfer_requested": 2,
-                "transfer_applied": transfer_final
+                "base_transfer": BASE_TRANSFER,
+                "transfer_after_repeat": after_repeat,
+                "final_transfer": final_transfer
             },
 
             "points_before": before_points,
@@ -147,12 +163,13 @@ class GameEngine:
             "player": player,
             "take_from": take_from,
             "give_to": give_to,
-            "amount": transfer_final,
+            "amount": final_transfer,
             "reason": reason
         })
 
         log_move(log)
 
+        # Advance turn
         self.state.turn_index += 1
 
         next_player = (
@@ -167,10 +184,9 @@ class GameEngine:
                 "player": player,
                 "take_from": take_from,
                 "give_to": give_to,
-                "amount": transfer_final,
+                "amount": final_transfer,
                 "reason": reason
             },
             "next_player": next_player,
             "points": after_points
-        }    
-
+        }
